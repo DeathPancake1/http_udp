@@ -60,7 +60,6 @@ class HTTP_request:
                 else:
                     print("Status 404 NOT FOUND")
                 con.close()
-                con.recv_pkt()
         else:
             print("Connection Not Accepted")
 
@@ -99,6 +98,7 @@ class Connection:
 
     def send_pkt(self, data):
         if self.send:
+            self.sock.settimeout(1)
             packet = Packet(self.seq_num, self.ack_num, data, 0)
             passes = 0
             while True:
@@ -126,6 +126,7 @@ class Connection:
 
     def recv_pkts(self):
         if self.receive:
+            self.sock.settimeout(3)
             while True:
                 packet, address = self.sock.recvfrom(1024)
                 packet = from_bytes(packet)
@@ -148,8 +149,10 @@ class Connection:
                         ack_packet = Packet(0, (packet.seq_num + 1) % 2, '', 0b01000000)
                         self.sock.sendto(to_bytes(ack_packet), self.address)
 
+
     def recv_pkt(self):
         if self.receive:
+            self.sock.settimeout(3)
             while True:
                 packet, address = self.sock.recvfrom(1024)
                 packet = from_bytes(packet)
@@ -178,6 +181,7 @@ class Connection:
                 self.send_pkt(line)
 
     def close(self):
+        self.sock.settimeout(3)
         # send FIN packet
         fin_pkt = Packet(self.seq_num, self.ack_num, '', 0b00100000)
         passes = 0
@@ -211,6 +215,95 @@ class Connection:
             except Exception as e:
                 pass
             print("Connection closed")
+
+    def pack_crrpt(self, packet):
+        packet.checksum += 3
+        packet.checksum = (packet.checksum & 0xffff) + (packet.checksum >> 16)
+
+    def lose_one_ack(self, data):
+        if self.send:
+            self.sock.settimeout(1)
+            packet = Packet(self.seq_num, self.ack_num, data, 0)
+            passes = 0
+            while True:
+                try:
+                    self.sock.sendto(to_bytes(packet), self.address)
+                    if passes == 0:
+                        _, _ = self.sock.recvfrom(1024)
+                    ack_packet, address = self.sock.recvfrom(1024)
+                    ack_packet = from_bytes(ack_packet)
+                    print("seq", self.seq_num)
+                    if not ack_packet.is_corrupt():
+                        if ack_packet.ack_num == (self.seq_num + 1) % 2:
+                            self.seq_num += 1
+                            self.seq_num %= 2
+                            # Acknowledgment received, move on to the next packet
+                            break
+                        else:
+                            pass
+                    else:
+                        raise Exception("Corrupt Packet")
+                except socket.timeout:
+                    if passes < 3:
+                        passes += 1
+                        pass
+                    else:
+                        raise Exception("No ACK received")
+
+    def crrpt_one_pack(self):
+        if self.receive:
+            self.sock.settimeout(1.5)
+            passes = 0
+            while True:
+                packet, address = self.sock.recvfrom(1024)
+                packet = from_bytes(packet)
+                if passes == 0:
+                    self.pack_crrpt(packet)
+                    passes += 1
+                if not packet.is_corrupt():
+                    if packet.seq_num == self.ack_num and packet.flags & 0xE0 == 0b00100000:
+                        finack_pkt = Packet(self.seq_num, self.ack_num, '', 0b01100000)
+                        self.sock.sendto(to_bytes(finack_pkt), self.address)
+                        self.receive = False
+                        self.handle_close()
+                        break
+                    elif packet.seq_num == self.ack_num:
+                        self.ack_num += 1
+                        self.ack_num = self.ack_num % 2
+                        print(self.ack_num)
+                        ack_packet = Packet(0, self.ack_num, '', 0b01000000)
+                        self.sock.sendto(to_bytes(ack_packet), self.address)
+                        self.received_pkts.append(packet.data)
+                        break
+                    else:
+                        ack_packet = Packet(0, (packet.seq_num + 1) % 2, '', 0b01000000)
+                        self.sock.sendto(to_bytes(ack_packet), self.address)
+
+    def lose_first_pack(self):
+        if self.receive:
+            self.sock.settimeout(1.5)
+            while True:
+                _, _ = self.sock.recvfrom(1024)
+                packet, address = self.sock.recvfrom(1024)
+                packet = from_bytes(packet)
+                if not packet.is_corrupt():
+                    if packet.seq_num == self.ack_num and packet.flags & 0xE0 == 0b00100000:
+                        finack_pkt = Packet(self.seq_num, self.ack_num, '', 0b01100000)
+                        self.sock.sendto(to_bytes(finack_pkt), self.address)
+                        self.receive = False
+                        self.handle_close()
+                        break
+                    elif packet.seq_num == self.ack_num:
+                        self.ack_num += 1
+                        self.ack_num = self.ack_num % 2
+                        print(self.ack_num)
+                        ack_packet = Packet(0, self.ack_num, '', 0b01000000)
+                        self.sock.sendto(to_bytes(ack_packet), self.address)
+                        self.received_pkts.append(packet.data)
+                        pass
+                    else:
+                        ack_packet = Packet(0, (packet.seq_num + 1) % 2, '', 0b01000000)
+                        self.sock.sendto(to_bytes(ack_packet), self.address)
 
 
 class Packet:
